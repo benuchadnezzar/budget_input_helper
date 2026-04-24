@@ -1,85 +1,130 @@
-function onEdit(e) {
-    const sheet = e.source.getActiveSheet();
-    const range = e.range;
-  
-    if (sheet.getName() === "Input") {
-      const editedRow = range.getRow();
-      const editedColumn = range.getColumn();
-  
-      if (editedRow === 2 && (editedColumn === 1 || editedColumn === 2)) {
-        const amount = sheet.getRange("A2").getValue();
-        const category = sheet.getRange("B2").getValue();
-        if (amount && category) {
-          cutAndPaste();
-        }
-      }
+// ============================================================
+// Expense logger. Edits to the "Input" sheet get appended to a
+// monthly log sheet. A time-driven trigger runs createMonthlySheet
+// on the 1st of each month (midnight–1am) to pre-create that
+// month's sheet from the prior month's template.
+// ============================================================
+
+// --- Helpers ---------------------------------------------------
+
+// Today at noon in the spreadsheet's timezone. Noon keeps day-math
+// safely away from DST transitions and date boundaries.
+function getSpreadsheetTodayAtNoon() {
+  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  const now = new Date();
+  const dateString = Utilities.formatDate(now, tz, "yyyy-MM-dd");
+  const offsetString = Utilities.formatDate(now, tz, "XXX"); // e.g. "-05:00"
+  return new Date(`${dateString}T12:00:00${offsetString}`);
+}
+
+// Returns { currentKey, priorKey } like "October 2026" / "September 2026",
+// computed in the spreadsheet's timezone.
+function getMonthKeys() {
+  const tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  const today = getSpreadsheetTodayAtNoon();
+
+  const year = parseInt(Utilities.formatDate(today, tz, "yyyy"), 10);
+  const month = parseInt(Utilities.formatDate(today, tz, "MM"), 10); // 1–12
+
+  const priorYear = month === 1 ? year - 1 : year;
+  const priorMonthIdx = month === 1 ? 11 : month - 2; // 0-indexed
+  const monthNames = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December'];
+
+  return {
+    currentKey: Utilities.formatDate(today, tz, "MMMM yyyy"),
+    priorKey: `${monthNames[priorMonthIdx]} ${priorYear}`
+  };
+}
+
+// Hide every sheet except "Input" and the given sheet to keep.
+// Apps Script won't let you hide the active sheet, so activate
+// the keeper first.
+function hideOldMonthSheets(keepSheet) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.setActiveSheet(keepSheet);
+
+  ss.getSheets().forEach(sheet => {
+    const name = sheet.getName();
+    if (name !== "Input" && name !== keepSheet.getName()) {
+      sheet.hideSheet();
     }
-  }
-  
-  function cutAndPaste() {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const inputSheet = ss.getSheetByName("Input");
-  
-    const today = new Date();
-    const monthName = today.toLocaleString('default', { month: 'long' });
-    const year = today.getFullYear();
-    const currentMonthName = `${monthName} ${year}`;
+  });
+}
+
+// Ensures a sheet exists for the current month. Copies the prior
+// month's sheet as a template if available; otherwise creates a
+// bare sheet with just the header row.
+function ensureCurrentMonthSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const { currentKey, priorKey } = getMonthKeys();
+
+  const existing = ss.getSheetByName(currentKey);
+  if (existing) return existing;
+
+  const template = ss.getSheetByName(priorKey);
+  if (template) {
+    const sheet = template.copyTo(ss);
+    sheet.setName(currentKey);
+    ss.setActiveSheet(sheet);
+    ss.moveActiveSheet(ss.getSheets().length);
+
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow > 1 && lastCol > 0) {
+      sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+    }
     
-    const amount = inputSheet.getRange("A2").getValue();
-    const category = inputSheet.getRange("B2").getValue();
-    if (!amount || !category) return;
-  
-    let monthlySheet = ss.getSheetByName(currentMonthName);
-    if (!monthlySheet) {
-      monthlySheet = ss.insertSheet(currentMonthName);
-      monthlySheet.appendRow(['Date', 'Amount', 'Category']);
-    }
-  
-    const dateOnly = Utilities.formatDate(today, ss.getSpreadsheetTimeZone(), 'MM/dd/yyyy');
-    monthlySheet.appendRow([dateOnly, amount, category]);
-    inputSheet.getRange("A2:B2").clearContent();
+    hideOldMonthSheets(sheet);
+    return sheet;
   }
-  
-  function getSpreadsheetTodayAtNoon() {
-    const timeZone = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
-    const now = new Date();
-    const dateString = Utilities.formatDate(now, timeZone, "yyyy-MM-dd");
-    return new Date(`${dateString}T12:00:00`);
-  }
-  
-  function createMonthlySheet() {
-    // Get current month and year
-    const today = getSpreadsheetTodayAtNoon();
-    const monthName = today.toLocaleString('default', { month: 'long' });
-    const year = today.getFullYear();
-    const currentMonthName = `${monthName} ${year}`
 
-    // Get previous month
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-    const priorMonth = yesterday.toLocaleString('default', { month: 'long' });
-    const priorYear = yesterday.getFullYear();
-    const priorMonthName = `${priorMonth} ${priorYear}`;
+  const sheet = ss.insertSheet(currentKey);
+  sheet.appendRow(['Date', 'Amount', 'Category', 'Card Type']);
+  hideOldMonthSheets(sheet);
+  return sheet;
+}
 
-    // Create ss object
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+// --- Entry points ----------------------------------------------
 
-    // Create new sheet if no sheet matches currentMonthName
-    if (!ss.getSheetByName(currentMonthName)) {
-      const sourceSheet = ss.getSheetByName(priorMonthName);
-      if (sourceSheet) {
-        const newSheet = sourceSheet.copyTo(ss);
-        newSheet.setName(currentMonthName);
+function onEdit(e) {
+  const sheet = e.source.getActiveSheet();
+  if (sheet.getName() !== "Input") return;
 
-        ss.setActiveSheet(newSheet);
-        ss.moveActiveSheet(ss.getSheets().length);
+  const row = e.range.getRow();
+  const col = e.range.getColumn();
+  if (row !== 2 || col < 1 || col > 3) return;
 
-        const lastRow = newSheet.getLastRow();
-        const lastColumn = newSheet.getLastColumn();
+  const amount = sheet.getRange("A2").getValue();
+  const category = sheet.getRange("B2").getValue();
+  const cardType = sheet.getRange("C2").getValue();
+  if (!amount || !category || !cardType) return;
 
-        if (lastRow > 1 && lastColumn > 0) {
-          newSheet.getRange(2, 1, lastRow - 1, lastColumn).clearContent();
-        }
-      }
-    }
-  }
+  cutAndPaste();
+}
+
+function cutAndPaste() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const inputSheet = ss.getSheetByName("Input");
+
+  const amount = inputSheet.getRange("A2").getValue();
+  const category = inputSheet.getRange("B2").getValue();
+  const cardType = inputSheet.getRange("C2").getValue();
+  if (!amount || !category || !cardType) return;
+
+  const monthlySheet = ensureCurrentMonthSheet();
+  const today = getSpreadsheetTodayAtNoon();
+
+  monthlySheet.appendRow([today, amount, category, cardType]);
+
+  // Store date as a real Date; format the new cell as date-only.
+  const lastRow = monthlySheet.getLastRow();
+  monthlySheet.getRange(lastRow, 1).setNumberFormat('MM/dd/yyyy');
+
+  inputSheet.getRange("A2:C2").clearContent();
+}
+
+// Time-driven trigger: 1st of month, midnight–1am.
+function createMonthlySheet() {
+  ensureCurrentMonthSheet();
+}
